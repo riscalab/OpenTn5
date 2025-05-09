@@ -1,0 +1,213 @@
+---
+title: "OpenTn5_MCF7_AdditionalQC_08232023"
+author: "Joanna Yeung"
+date: '2023-08-23'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=F}
+library(readr)
+library(ggplot2)
+library(tidyverse)
+library(viridis)
+library(cowplot)
+load("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/OpenTn5_MCF7_QC_11082022_files/workspaces/CUTnTag_MCF7_QC_OpenTn5Proj_11082022.RData")
+```
+
+```{r}
+# read in mapped reads to other genomes files
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1")
+samplenames <- dir(pattern="MCF7_H")
+EColi_Reads_R1 <- list() # read 1
+EColi_Reads_R2 <- list() # read 2
+for(i in 1:8){
+EColi_Reads_R1[[i]] <- as.data.frame(read_table(paste0(samplenames[[i]], "/", dir(samplenames[[i]], pattern="R1_001.trim_screen.txt")), 
+    skip = 1))
+EColi_Reads_R1[[i]]$samples <- samplenames[i] # include sample name associated with EColi Reads
+EColi_Reads_R1[[i]] <- EColi_Reads_R1[[i]][EColi_Reads_R1[[i]]$Genome %in% "Ecoli", ] # keep only row containing EColi reads info
+
+EColi_Reads_R2[[i]] <- as.data.frame(read_table(paste0(samplenames[[i]], "/", dir(samplenames[[i]], pattern="R1_001.trim_screen.txt")), 
+    skip = 1))
+EColi_Reads_R2[[i]]$samples <- samplenames[i]
+EColi_Reads_R2[[i]] <- EColi_Reads_R2[[i]][EColi_Reads_R2[[i]]$Genome %in% "Ecoli", ] # keep only row containing EColi reads info
+}
+
+# convert list to dataframe
+EColi_Reads_R1 <- do.call(rbind, EColi_Reads_R1)
+EColi_Reads_R2 <- do.call(rbind, EColi_Reads_R2)
+
+# remove "#" & "%" characters from column names
+colnames(EColi_Reads_R1) <- gsub("#", "", colnames(EColi_Reads_R1))
+colnames(EColi_Reads_R2) <- gsub("#", "", colnames(EColi_Reads_R2))
+colnames(EColi_Reads_R1) <- gsub("%", "Percent", colnames(EColi_Reads_R1))
+colnames(EColi_Reads_R2) <- gsub("%", "Percent", colnames(EColi_Reads_R2))
+
+# merge EColi Reads dataframe with additional sample metaData information
+EColi_Reads_R1 <- merge(EColi_Reads_R1, metaData, by.y = "samples")
+EColi_Reads_R2 <- merge(EColi_Reads_R2, metaData, by.y = "samples")
+
+# export raw data to csv for Jan
+write.csv(EColi_Reads_R1, "/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/OpenTn5_MCF7_QC_11082022_files/EColi_Reads_R1.csv")
+
+write.csv(EColi_Reads_R2, "/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/OpenTn5_MCF7_QC_11082022_files/EColi_Reads_R2.csv")
+EColi_Reads_R1
+EColi_Reads_R2 
+```
+
+```{r}
+# plot mapped EColi reads comparison between Jan's pG-Tn5 vs' Epicypher's pAG-Tn5
+EColi_Reads_R1_plot <- ggplot(EColi_Reads_R1, aes(x=Histone, y=PercentOne_hit_one_genome, fill= Histone)) +
+    geom_boxplot() +
+    geom_point(aes(color = Replicate)) +
+    facet_wrap(~Tn5) +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    theme_bw(base_size = 18) +
+    ylab("% EColi Reads") +
+    xlab("")
+
+EColi_Reads_R1_plot
+```
+
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1")
+# Read in CUT&Tag Summary log file. 
+CnTseq_Summary <- read.table("CUTnTagRunSummary.log",skip=32, header=T, skipNul = TRUE)[8:16, ]
+temp <- data.frame(samples="MCF7_IgG", Histone="IgG", Tn5="EC", Replicate=1)
+metaData <- rbind(metaData, temp)
+rm(temp)
+CnTseq_Summary <- cbind(CnTseq_Summary, metaData[ ,2:4])
+CnTseq_Summary$PERCENT_ALIGNED <- as.numeric(gsub("%", "", CnTseq_Summary$PERCENT_ALIGNED))
+CnTseq_Summary$PERCENT_DUPLICATED <- as.numeric(gsub("%", "", CnTseq_Summary$PERCENT_DUPLICATED))
+CnTseq_Summary$PERCENT_MITOCHONDRIAL <- as.numeric(gsub("%", "", CnTseq_Summary$PERCENT_MITOCHONDRIAL))
+CnTseq_Summary$AVG_MYCOPLASMA_MAP <- as.numeric(gsub("%", "", CnTseq_Summary$AVG_MYCOPLASMA_MAP))
+CnTseq_Summary$ADAPTER_MAP <- as.numeric(gsub("%", "", CnTseq_Summary$ADAPTER_MAP))
+```
+```{r}
+LibrarySizeFig <- ggplot(CnTseq_Summary, aes(x=Histone, y=ESTIMATED_LIBRARY_SIZE, label=ESTIMATED_LIBRARY_SIZE, fill=Histone))+
+  geom_boxplot()+
+geom_jitter(aes(color = Replicate), position = position_jitter(0.15))+
+  facet_grid(~Tn5, scales="free", space = "free")+
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8)+
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+  xlab("Sample") + 
+  ylab("Estimated Number of Unique Fragments") + 
+  ggtitle("Estimated Library Size") +
+theme_bw(base_size = 18) +
+theme(axis.text.x=element_blank())
+LibrarySizeFig
+```
+```{r}
+PercentAligned <- ggplot(CnTseq_Summary, aes(x=Histone, y=PERCENT_ALIGNED, fill=Histone))+
+  geom_boxplot()+
+geom_jitter(aes(color = Replicate), position = position_jitter(0.15))+
+  facet_grid(~Tn5, scales="free", space = "free")+
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8)+
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+  xlab("Sample") + 
+  ylab("% of Read Pairs Aligned") + 
+  ggtitle("Percent Alignment") +
+theme_bw(base_size = 18)
+PercentAligned
+```
+```{r}
+PercentMito <- ggplot(CnTseq_Summary, aes(x=Histone, y=PERCENT_MITOCHONDRIAL, fill=Histone))+
+  geom_boxplot()+
+geom_jitter(aes(color = Replicate), position = position_jitter(0.15))+
+  facet_grid(~Tn5, scales="free", space = "free")+
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8)+
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+  xlab("Sample") + 
+  ylab("% of Mitochondrial Read Pairs") + 
+  ggtitle("Percent Mitochondrial Reads") +
+theme_bw(base_size = 18)
+PercentMito
+```
+```{r}
+PercentDup <- ggplot(CnTseq_Summary, aes(x=Histone, y=PERCENT_DUPLICATED, fill=Histone))+
+  geom_boxplot()+
+geom_point(aes(color = Replicate), position = position_jitter(0.05))+
+  facet_grid(~Tn5, scales="free", space = "free")+
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8)+
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+  xlab("Sample") + 
+  ylab("% of Duplicate Read Pairs") + 
+  ggtitle("Percent Duplicate Reads") +
+theme_bw(base_size = 18)
+PercentDup
+```
+```{r}
+PercentMyco <- ggplot(CnTseq_Summary, aes(x=Histone, y=AVG_MYCOPLASMA_MAP, fill=Histone))+
+  geom_boxplot()+
+geom_point(aes(color = Replicate))+
+  facet_grid(~Tn5, scales="free", space = "free")+
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8)+
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+  xlab("Sample") +
+  ylab("% Read Pairs mapped to Mycoplasma genome") + 
+  ggtitle("Mycoplasma Contamination") +
+theme_bw(base_size = 18)
+PercentMyco
+```
+```{r}
+PercentAdap <- ggplot(CnTseq_Summary, aes(x=Histone, y=ADAPTER_MAP, fill=Histone))+
+  geom_boxplot()+
+geom_point(aes(color = Replicate))+
+  facet_grid(~Tn5, scales="free", space = "free")+
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8)+
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+  xlab("Sample") +
+  ylab("% Adapter Read Pairs") + 
+    ylim(0,1)+
+  ggtitle("Percent Adapter Reads") +
+theme_bw(base_size = 18)
+PercentAdap
+```
+```{r}
+RawReads <- ggplot(CnTseq_Summary, aes(x=Histone, y=RAW_READ_PAIRS, fill=Histone))+
+  geom_boxplot()+
+geom_point(aes(color = Replicate))+
+  facet_grid(~Tn5, scales="free", space = "free")+
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8)+
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+  xlab("Sample") +
+  ylab("Number of Raw Read Pairs") + 
+ ylim(0,12500000)+
+  ggtitle("Sequencing Depth") +
+theme_bw(base_size = 18)
+RawReads
+
+FilteredReads <- ggplot(CnTseq_Summary, aes(x=Histone, y=READ_PAIRS_POST_FILTER, fill=Histone))+
+  geom_boxplot()+
+geom_point(aes(color = Replicate))+
+  facet_grid(~Tn5, scales="free", space = "free")+
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8)+
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+  xlab("Sample") +
+  ylab("Number of Post-filtered Read Pairs") + 
+  ggtitle("Sequencing Depth after filtering") +
+ylim(0,12500000)+
+theme_bw(base_size = 18)
+FilteredReads
+
+cowplot::plot_grid(RawReads, FilteredReads, axis="tblr")
+```
+
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/OpenTn5_MCF7_QC_11082022_files/Figures")
+pdf("OpenTn5_Additional_QC_Figures_08252023.pdf", width=10, height=8)
+LibrarySizeFig
+PercentDup
+PercentMito
+PercentAdap
+PercentMyco
+EColi_Reads_R1
+RawReads
+FilteredReads
+dev.off()
+```
+

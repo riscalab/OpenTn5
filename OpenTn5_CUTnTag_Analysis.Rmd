@@ -1,0 +1,764 @@
+---
+title: "OpenTn5_MCF7_QC_11082022"
+author: "Joanna Yeung"
+date: "11/8/2022"
+output: html_document
+---
+
+## **EXPERIMENT**: Comparison of CUTnTag experiment done in cycling MCF7 cells between Jan's pG-Tn5 enzyme & Epicypher's pAG-Tn5 enzyme. Histone modifications probed are H3K27ac & H3K27me3. Analysis was done for Jan's OpenTn5 project. 
+### ~100,000 cells per sample 
+### **Antibody information**: 
+#### 1. Tri-Methyl-Histone H3 (Lys27) (C36B11) Rabbit mAb, 9733T, Cell Signaling Technology 1:50
+#### 2. Anti-Histone H3 (acetyl K27) antibody - ChIP Grade (ab4729), Abcam 1:100
+#### 3. Guinea Pig anti-Rabbit IgG (Heavy & Light Chain) antibodyA14, Guinea Pig, ABIN101961 1:100
+
+# **WHAT WAS DONE**: 
+## peakcalling with SEACR with stringent threshold of 1% 
+## fragment Counts under peaks evaluated with chromVAR
+## peakInfo: peak width distribution, peak number per sample, peak reproducibility between replicates & EC vs Jan's Tn5, FRIP score, fragment length distribution
+## similarity between EC & Jan's Tn5: rlog normalized DESeq2 object created to calculate pearson correlation coefficients, PCA & scatterplot comparison
+## nonredundant master peak sets created per Histone modification by merging overlapping peaks into 1 peak set. 
+
+```{r setup, include=FALSE, warning=F, message=F}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# PEAKCALLING WITH SEACR: 
+
+#### make text files containing paths to bedgraph files (input into SEACR) & sample names
+```{sh, eval=F}
+cd /lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/sortedBam/BEDGRAPH
+find $(pwd) -name '*.bedgraph'|sort|cat>filenames.txt
+ls $(pwd) |grep "bedgraph"|sed 's/.clean.fragments.bedgraph//g'|sort|cat>samplenames.txt
+```
+
+### for loop to do SEACR peakcalling on non-normalized (non) bedgraph files with stringent threshold (stringent) & by selecting the top 1% of regions by AUC (0.01)
+#### outdir= directory where you want output file to be
+#### number= number of sample files you want to process
+```{sh, eval=F}
+for number in 1p 2p 3p 4p 5p 6p 7p 8p 9p 10p 11p 12p 13p 14p 15p 16p;
+do
+outdir=/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/SEACR_peakcalled
+file=$(sed -n $number /lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/sortedBam/BEDGRAPH/filenames.txt) # for example, if $number is 2p, sed function will only read the 2nd line in filenames.txt
+samplenames=$(sed -n $number /lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/sortedBam/BEDGRAPH/samplenames.txt)
+
+bash /lustre/fs4/risc_lab/scratch/jyeung/scripts/pipelines/CUTnTag_pipeline/SEACR_peakcaller/SEACR_1.3.sh $file 0.01 non stringent $outdir/$samplenames.stringent.0.01.output # bash command to run SEACR 
+done
+```
+
+
+```{r}
+library(GenomicRanges)
+library(rtracklayer)
+library(chromVAR)
+library(DESeq2)
+library(pheatmap)
+library(ggplot2)
+library(RColorBrewer)
+library(cowplot)
+library(preprocessCore)
+library(viridis)
+library(scales)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene) # or whatever genome you are using
+library(gridExtra)
+library(grid)
+library(lattice)
+```
+
+# make dataframe containing metaData for samples. 
+```{r}
+library(stringr)
+library(dplyr)
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/SEACR_peakcalled/AUC_0_01")
+dir <- "/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/SEACR_peakcalled/AUC_0_01"
+
+sampleList <- dir(pattern=".bed")[str_detect(dir(pattern=".bed"), pattern="IgG", negate=T)] # find bed files that do not have "IgG" in file name. 
+
+peakInfo <- strsplit(sampleList, "_") # split sample names into multiple components for making metaData columns 
+
+# make dataframe containing metaData for samples. 
+Summary <- data.frame(samples=gsub(".stringent.0.01.output.stringent.bed", "", sampleList), cell_line=unlist(lapply(peakInfo, function(peakInfo){peakInfo[[1]]})), Histone=unlist(lapply(peakInfo, function(peakInfo){peakInfo[[2]]})), 
+Tn5=ifelse(grepl("JanpGTn5", sampleList), "pGTn5", "EC"), 
+Spikein=ifelse(grepl("SI", sampleList), "Yes", "No"),
+Replicate=ifelse(grepl("_1", sampleList), "1", ifelse(grepl("_2", sampleList), "2", "")), 
+paths=dir(dir, pattern=".bed", full.names=T)[str_detect(dir(pattern=".bed", full.names=T), pattern="IgG", negate=T)])
+Summary$Replicate[1:6] <- c("1", "1", "2", "2", "1", "2") # specify replicates for LS8817 samples because they were not in the sample names
+Summary$paths <- as.character(Summary$paths) # reclass paths as character instead of factor. 
+
+Summary
+```
+
+# find number of peaks & peak width for each peak 
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/SEACR_peakcalled/AUC_0_01")
+peakN = data.frame()
+peakWidth = c()
+
+for(i in 1:length(sampleList)){
+  
+peakInfo = read.table(sampleList[i], header = FALSE, fill = TRUE)  %>% mutate(width = abs(V3-V2)) # read in bed files & calculate width of each peak by doing chr end-chr start coordinate. 
+      peakN = data.frame(samples=Summary$samples[i] ,peakN = nrow(peakInfo), Histone = Summary$Histone[i], cell_line=Summary$cell_line[i], Tn5=Summary$Tn5[i], Replicate = Summary$Replicate[i]) %>% rbind(peakN, .) # make dataframe containing number of peaks by calculating number of rows in peakInfo (where each row corresponds to 1 peak for ith sample), include metaData of samples & then rbind to previous iteration
+    
+      peakWidth = data.frame(samples=Summary$samples[i], cell_line=Summary$cell_line[i], Tn5=Summary$Tn5[i], width = peakInfo$width, Histone = Summary$Histone[i], Replicate = Summary$Replicate[i], PeakSet="sample")  %>% rbind(peakWidth, .) # make dataframe containing peakWidth by taking width column of peakInfo, include metaData of samples & then rbind to previous iteration
+}
+
+peakN
+peakWidth
+```
+
+# find reproducible peaks within replicates for MCF7 cells
+```{r}
+library(GenomicRanges)
+
+peakInfo.gr <- list()
+for(i in 1:nrow(Summary[Summary$cell_line %in% "MCF7", ])){
+  peakInfo <- list()
+  peakInfo[[i]] <- read.table(Summary[Summary$cell_line %in% "MCF7", ]$paths[i], header = FALSE, fill = TRUE) # read in bed files for peaks for ith sample
+  peakInfo.gr[[i]] = GRanges(peakInfo[[i]]$V1, IRanges(start = peakInfo[[i]]$V2, end = peakInfo[[i]]$V3), strand = "*") # convert bed file info into GRanges object
+}
+names(peakInfo.gr) <- Summary[Summary$cell_line %in% "MCF7", ]$samples  # name of each object in peakInfo.gr is sample name
+
+# find peaks that overlap between each replicate
+overlaps <- list()
+overlap.gr <- list()
+reduced <- list()
+for(i in 1:length(peakInfo.gr)){
+  if(i %% 2==1){ # if i is an odd number, find Overlaps between i & i+1 GRanges object in peakInfo.gr (the order corresponds to rep1 & rep2)
+  overlaps[[i]] <- findOverlaps(peakInfo.gr[[i]], peakInfo.gr[[i+1]])  
+  overlap.gr[[i]] <- subsetByOverlaps(peakInfo.gr[[i]], peakInfo.gr[[i+1]]) # make GRanges object that is subsetted for peaks that overlap with other replicate
+  }else{ # else if i is an even number, find Overlaps between i & i-1 GRanges object in peakInfo.gr (the order corresponds to rep2 & rep1)--> this number will be the same as the previous iteration
+  overlaps[[i]] <- findOverlaps(peakInfo.gr[[i]], peakInfo.gr[[i-1]])  
+  overlap.gr[[i]] <- subsetByOverlaps(peakInfo.gr[[i]], peakInfo.gr[[i-1]]) # make GRanges object that is subsetted for peaks that overlap with other replicate
+  }
+} 
+
+# reduce peaks amongst replicates into 1 master peak set per Tn5 condition (keep only overlapping peaks, remove non-reproducible peaks, and merge overlapping peaks into 1 peak)
+for(i in 1:length(overlap.gr)){
+if(i %% 2==1){# if i is an odd number, reduce peak set for rep 1 & rep 2
+reduced[[i]] <- reduce(unlist(GRangesList(overlap.gr[[i]], overlap.gr[[i+1]])))
+  }else{ # if i is an even number, reduce peak set for rep 2 & rep 1--> this will be the same GRanges object as previous iteration
+reduced[[i]] <- reduce(unlist(GRangesList(overlap.gr[[i]], overlap.gr[[i-1]])))
+  }  
+}
+names(reduced) <- gsub("EC", "ECpAGTn5", paste0(Summary$cell_line, "_", Summary$Histone, "_", Summary$Tn5, "_overlap.bed")[7:14])
+
+# save masterpeak set for each Tn5/Histone condition. 
+for(i in seq(1, length(reduced), by=2) ){
+  export.bed(reduced[[i]], con=paste0("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/OpenTn5_MCF7_QC_11082022_files/peaks/", names(reduced)[i]) )
+}
+
+# make dataframe with peak reproducibility information:
+## metaData for samples
+## peaks_overlap column indicates number of peaks in each sample that overlap with peaks in other replicate
+## reduced_peaks column is a peakset where peaks of replicate 1 & 2 overlapping peaks are merged into 1 contig & non-reproducible peaks are removed. 
+## peaks_in_rep column indicates number of peaks called by SEACR in individual samples
+peakReprod <- data.frame(Summary[ ,c("samples","Histone","Tn5", "Replicate")][7:14, ],
+peaks_overlap=unlist(lapply(overlaps, length)), reduced_peaks=unlist(lapply(reduced, length)), peaks_in_rep=peakN[peakN$cell_line %in% "MCF7", ]$peakN)
+
+## reprod_rate column is the % of peaks in each sample that overlap with other replicate
+peakReprod$reprod_rate <- (peakReprod$peaks_overlap/peakReprod$peaks_in_rep)*100
+
+## Tn5overlap column is the number of peaks that overlap between reduced peak sets of EC replicates & Jan's pGTn5 replicates for each Histone. 
+peakReprod$Tn5overlap <- c(rep(length(findOverlaps(reduced[[1]], reduced[[3]])), 4), rep(length(findOverlaps(reduced[[5]], reduced[[7]])), 4))
+
+## reprod_rateTn5 column is the % of peaks that overlap between reduced peak sets of EC replicates & Jan's pGTn5 replicates for each Histone. 
+peakReprod$reprod_rateTn5 <- (peakReprod$Tn5overlap/peakReprod$reduced_peaks)*100
+```
+
+# FRIP score calculation: % fragments in peaks for each sample
+```{r}
+library(Rsamtools)
+# make vector of bam files' directory paths 
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1")
+bamDir <- c()
+for(i in 1:length(Summary$samples[7:14])){
+bamDir[i] <- dir(as.character(Summary$samples[7:14][i]), pattern="trim.st.all.blft.qft.rmdup.bam$")
+}
+
+#convert fragmentCounts into matrix format with each peak as rows and number of reads per peak in each sample as cells of the matrix. 
+FRIP <- data.frame(Summary[ ,c("samples", "Histone", "Tn5", "Replicate")][7:14, ])
+
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1")
+for(i in 1:length(Summary$samples[7:14])){
+  
+idxstats <- idxstatsBam(paste0(Summary$samples[7:14][i], "/",bamDir[i]), index= paste0(Summary$samples[7:14][i], "/", "intermediates/", bamDir[i], ".bai"))[1:23, 3] # get number of mapped reads to each chromosome from chr1:22 & chrX using idxstats function from Rsamtools package. 
+
+FRIP$totalFrag[i] <- sum(idxstats)/2 # since this is pair-end data, divide by 2 to get number of mapped read pairs, in other words, 1 fragment=1 read pair. This is the total number of fragments for each sample. 
+}
+
+# use chromVAR to get fragment Counts under peaks for each samples peak set called by SEACR (peakInfo.gr)
+for(i in 1:8){
+fragCounts <- chromVAR::getCounts(paste0(Summary$samples[7:14][i],"/",bamDir[i]), peakInfo.gr[[i]], paired=TRUE, by_rg=FALSE, format="bam")
+fragCounts <- SummarizedExperiment::assays(fragCounts)[[1]] # convert fragment Counts into counts matrix
+FRIP$fraginPeaks[i] <- sum(fragCounts) # get total number of fragments under peaks by getting sum of fragment counts for ith sample. 
+}
+
+# calculate FRIP score= # fragments in peaks/total fragments
+FRIP$FRIP <- FRIP$fraginPeaks/FRIP$totalFrag 
+```
+
+# VISUALIZATION: peak Width, peak Number, peak reproducibility between replicates or between Tn5, FRIP score
+```{r}
+library(ggplot2)
+library(viridis)
+pW_plot <- peakWidth[peakWidth$cell_line %in% "MCF7", ] %>% ggplot(aes(x = samples, y = width, fill = Histone)) + scale_y_continuous(limits = c(0,22000))+
+    geom_violin() + facet_wrap(~Tn5)+
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    scale_y_continuous(trans = "log", breaks = c(400, 3000, 22000)) +
+    theme_bw(base_size = 18) +
+    ylab("Width of Peaks") +
+    xlab("")+
+  theme(axis.text.x=element_blank())
+
+pN_plot <- peakN[peakN$cell_line %in% "MCF7", ] %>% ggplot(aes(x = Histone, y = peakN, fill = Histone)) +
+    geom_boxplot() +
+    geom_jitter(aes(color = Replicate), position = position_jitter(0.15)) +
+    facet_wrap(~Tn5) +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    theme_bw(base_size = 18) +
+    ylab("Number of Peaks") +
+    xlab("")+
+  theme(axis.text.x=element_blank())
+
+reprod_plot <- peakReprod %>% ggplot(aes(x = samples, y = reprod_rate, fill = Histone, label=peaks_in_rep)) +
+    geom_bar(stat = "identity") +
+  geom_text()+
+    facet_grid(~Tn5, scales = "free", space = "free") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    theme_bw(base_size = 18) +
+    ylab("% of Peaks Reproduced between replicates") + theme(axis.text.x=element_blank())+
+    xlab("")
+
+reprodTn5_plot <- peakReprod %>% ggplot(aes(x = samples, y = reprod_rateTn5, fill = Tn5, label=reduced_peaks)) +
+    geom_bar(stat = "identity") +
+  geom_text()+
+    facet_grid(~Histone, scales = "free", space = "free") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    theme_bw(base_size = 18) +
+    ylab("% of Peaks Reproduced between EC & Jan's Tn5") + theme(axis.text.x=element_blank())+
+    xlab("")
+
+FRIP_plot <- FRIP %>% ggplot(aes(x = Histone, y = FRIP, fill = Histone)) +
+    geom_boxplot() +
+  geom_jitter(aes(color = Replicate), position = position_jitter(0.15)) +
+  facet_wrap(~Tn5) +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    theme_bw(base_size = 18) +
+    ylab("% of Fragments in Peaks") +
+    xlab("")
+
+# plot above plots
+pW_plot
+pN_plot
+reprod_plot
+reprodTn5_plot
+FRIP_plot
+```
+
+# get fragment counts under non redundant peaks (combine EC & Jan's pGTn5 replicates for each histone)
+```{r}
+library(chromVAR)
+# make non-redundant peak set
+nR_peaks_K27ac <- reduce(unlist(GRangesList(reduced[1:4]))) # non-redundant master peak set for H3K27ac
+nR_peaks_K27ac$name <- paste0(seqnames(nR_peaks_K27ac), ":",ranges(nR_peaks_K27ac)) # give each peak a unique id with this pattern: chr_:start-end
+# save nonredundant master peak set for H3K27ac as bed file. 
+export.bed(nR_peaks_K27ac, con="/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/OpenTn5_MCF7_QC_11082022_files/peaks/MCF7_CUTnTag_H3K27ac_masterpeakset.bed")
+nR_peaks_K27me3 <- reduce(unlist(GRangesList(reduced[5:8]))) # non-redundant master peak set for H3K27me3
+nR_peaks_K27me3$name <- paste0(seqnames(nR_peaks_K27me3), ":",ranges(nR_peaks_K27me3)) # give each peak a unique id with this pattern: chr_:start-end
+# save nonredundant master peak set for H3K27me3 as bed file. 
+export.bed(nR_peaks_K27me3, con="/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/OpenTn5_MCF7_QC_11082022_files/peaks/MCF7_CUTnTag_H3K27me3_masterpeakset.bed")
+
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/")
+## overlap with bam file to get count under H3K27ac nonredundant peak set
+fragCounts_ac = getCounts(paste0(Summary$samples[7:14],"/",bamDir), nR_peaks_K27ac, paired=TRUE, by_rg=FALSE, format="bam")
+## overlap with bam file to get count under H3K27me3 nonredundant peak set
+fragCounts_me3 = getCounts(paste0(Summary$samples[7:14],"/",bamDir), nR_peaks_K27me3, paired=TRUE, by_rg=FALSE, format="bam")
+
+# convert fragment Counts into count matrices
+fragCounts_acMat <- SummarizedExperiment::assays(fragCounts_ac)[[1]]
+fragCounts_me3Mat <- SummarizedExperiment::assays(fragCounts_me3)[[1]]
+```
+
+## peak Width comparison before & after reducing peak sets. peak Width increases when you merge overlapping peaks (which is to be expected)
+```{r}
+# get widths of peaks from reduced peak sets for each set of replicates
+r_peakWidth <- list()
+for(i in 1:length(reduced)){
+  r_peakWidth[[i]] <- data.frame(samples=Summary$samples[7:14][i], cell_line="MCF7", Tn5=Summary$Tn5[7:14][i], width = width(reduced[[i]]), Histone = Summary$Histone[7:14][i], Replicate = "merged", PeakSet="reproducible btwn reps")
+}
+r_peakWidth <- do.call(rbind, r_peakWidth[c(1,3,5,7)]) # convert list to dataframe, but we only need to extract from one of the peaksets of each set of replicates, since both reps have the same reduced peak set as one another. 
+
+r_peakWidth <- rbind(r_peakWidth, data.frame(samples="nR_peaks_K27ac", cell_line="MCF7", Tn5="merged", width = width(nR_peaks_K27ac), Histone = "H3K27ac", Replicate = "merged", PeakSet="merged"), data.frame(samples="nR_peaks_K27me3", cell_line="MCF7", Tn5="merged", width = width(nR_peaks_K27me3), Histone = "H3K27me3", Replicate = "merged", PeakSet="merged")) # rbind reduced peak sets with dataframes specifying widths of non-redundant peak sets for H3K27ac & H3K27me3
+
+peakWidth <- rbind(peakWidth, r_peakWidth) # rbind everything with previous peakWidth df that contained peak Width for peaks called for individual samples to plot into ggplot
+```
+```{r}
+# plot peakWidths across different types of Peaksets
+
+# peakWidth for H3K27ac
+pW_ac <- peakWidth[peakWidth$cell_line %in% "MCF7" & peakWidth$Histone %in% "H3K27ac", ] %>% ggplot(aes(x = samples, y = width, fill = Tn5)) + scale_y_continuous(limits = c(0,22000))+
+    geom_violin() + facet_grid(~PeakSet, scales = "free", space = "free")+
+  geom_boxplot(width=0.2, outlier.size=0.1)+
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    scale_y_continuous(limits=c(0,10000), breaks = seq(0, 10000, 1000)) +
+    theme_bw(base_size = 10) +
+    ylab("Width of Peaks") +
+    xlab("")
+# peakWidth for H3K27me3
+pW_me3 <- peakWidth[peakWidth$cell_line %in% "MCF7" & peakWidth$Histone %in% "H3K27me3", ] %>% ggplot(aes(x = samples, y = width, fill = Tn5)) + scale_y_continuous(limits = c(0,22000))+
+    geom_violin() + facet_grid(~PeakSet, scales = "free", space = "free")+
+  geom_boxplot(width=0.2, outlier.size=0.1)+
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma", alpha = 0.8) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9) +
+    scale_y_continuous(limits=c(0,10000), breaks = seq(0, 10000, 1000)) +
+    theme_bw(base_size = 10) +
+    ylab("Width of Peaks") +
+    xlab("")
+
+plot_grid(pW_ac, pW_me3, nrow=2)
+```
+
+# PERFORM DESEQ2: used to get rlog normalized counts to perform PCA & sample correlation
+```{r}
+library(DESeq2)
+library(pheatmap)
+#make metaData dataframe as input into DESeq
+metaData <- Summary[ ,c("samples", "Histone", "Tn5", "Replicate")][7:14, ]
+
+# construct the DESeq object for fragment Counts under non-redundant H3K27ac master peak set
+K27ac_dds <- DESeq2::DESeqDataSetFromMatrix(countData=fragCounts_acMat, design= Histone~Tn5, colData= metaData, rowRanges = rowRanges(fragCounts_ac))
+# perform DESeq2
+K27ac_dds <- DESeq2::DESeq(K27ac_dds)
+# rlog normalize DESeq object
+rlog_K27ac_dds <- rlog(K27ac_dds)
+
+# make function that makes distance matrix, calculates correlation & plots correlation matrix
+makesampleDistMatrix <- function(dds, method, main){
+# get pearson correlation coefficients for pairwise comparisons between samples
+sampleDists <- dist(t(assay(dds))) # get rlog normalized count matrix & convert to distance measure for calculating correlations. 
+sampleDists <- as.dist(1 - sampleDists)
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- gsub("MCF7_", "", Summary$samples[7:14]) # specify row names as sample names 
+colnames(sampleDistMatrix) <- gsub("MCF7_", "", Summary$samples[7:14]) # specify col names as sample names 
+cor.matrix <-cor(sampleDistMatrix, method=method) # measure correlation 
+return(pheatmap::pheatmap(cor.matrix, main=main)) # plot correlation heatmap
+}
+
+# plot spearman correlation
+corr_K27ac_rlog <- makesampleDistMatrix(rlog_K27ac_dds, "spearman", main="Spearman correlation, rlog counts under H3K27ac Peaks")
+corr_K27ac <- makesampleDistMatrix(K27ac_dds, "spearman", main="Spearman correlation, raw counts under H3K27ac Peaks")
+
+# plot PCA for H3K27ac
+ac_PCA <- plotPCA(rlog_K27ac_dds, intgroup=c("Histone", "Tn5")) +theme_classic()+geom_point(size=2)
+
+corr_K27ac_rlog
+corr_K27ac
+ac_PCA 
+```
+
+```{r}
+# construct the DESeq object for fragment Counts under non-redundant H3K27me3 master peak set
+K27me3_dds <- DESeq2::DESeqDataSetFromMatrix(countData=fragCounts_me3Mat, design= Histone~Tn5, colData= metaData, rowRanges = rowRanges(fragCounts_me3))
+# perform DESeq2
+K27me3_dds <- DESeq2::DESeq(K27me3_dds)
+# rlog normalize DESeq object
+rlog_K27me3_dds <- rlog(K27me3_dds)
+
+# plot spearman correlation
+corr_K27me3_rlog <- makesampleDistMatrix(rlog_K27me3_dds, "spearman", main="Spearman correlation, rlog counts under H3K27me3 Peaks")
+corr_K27me3 <- makesampleDistMatrix(K27me3_dds, "spearman", main="Spearman correlation, raw counts under H3K27me3 Peaks")
+
+
+# plot PCA for H3K27me3
+me3_PCA <- plotPCA(rlog_K27me3_dds, intgroup=c("Histone", "Tn5")) +theme_classic()+geom_point(size=2)
+
+me3_PCA
+corr_K27me3_rlog 
+corr_K27me3
+```
+
+# PLOT FRAGMENT LENGTH DISTRIBUTIONS: 
+#### hist_data_withoutdups.log (output from Nicole's CUTnTag pipeline) from all of the samples to generate histograms of fragment size distributions & summary violin plots. 
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1")
+
+FLD <- list()
+
+for(i in 1:length(Summary$samples[7:14])){
+  FLD[[i]] <- read.table(paste0(Summary$samples[7:14][i], "/",Summary$samples[7:14][i], "_hist_data_withoutdups.log"), skip=10, header=T) # read in hist_data_withoutdups.log file for each sample
+}
+names(FLD) <- Summary$samples[7:14]
+
+# want each sample to have the same value of insert sizes from 1-1000bp (we don't want missing insert sizes because then it is hard to plot on ggplot if different samples have different axes. We will fill in the insert sizes with no reads as NA. 
+for(i in 1:length(FLD)){
+  hist <- data.frame(insert_size=1:1000) 
+  FLD[[i]] <- merge(hist, FLD[[i]], by="insert_size", all=T)
+} 
+final_hist <- do.call(rbind, FLD) # rbind each samples' histogram dataframe into 1 final dataframe. 
+final_hist$samples <- unlist(lapply(Summary$samples[7:14], rep, 1000)) # specify samples column so that we can color ggplot by sample. 
+
+final_hist <- cbind(final_hist, Summary[match(final_hist$samples, Summary$samples), c("Histone", "Tn5", "Replicate")])
+
+# ggplot fragment length distribution histogram: 
+FLD_Plot <- ggplot(final_hist, aes(x=insert_size, y=All_Reads.fr_count, colour=Tn5)) + 
+  facet_grid(~Histone, scales = "free", space = "free")+
+  geom_line(size=0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma") +
+   theme_bw(base_size = 10) + 
+  ylab("Count") + 
+  xlim(0,750)+
+  ggtitle("Fragment Length Distribution of all Samples") + 
+  theme(legend.position="bottom")
+
+# ggplot fragment length distribution histogram: 
+FLD_log10Plot <- ggplot(final_hist, aes(x=insert_size, y=log10(All_Reads.fr_count), colour=Tn5)) +
+  facet_grid(~Histone, scales = "free", space = "free")+
+  geom_line(size=0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma") +
+   theme_bw(base_size = 10) + 
+  ylab("log10 Count") + 
+  xlim(0,750)+
+  ggtitle("Fragment Length Distribution of all Samples") + 
+  theme(legend.position="bottom")
+
+# ggplot fragment length distribution violin plot: 
+FLD_Violin <- ggplot(final_hist, aes(x=samples, y=insert_size, weight=All_Reads.fr_count, fill=Tn5)) + geom_violin(bw=5) +
+  facet_grid(~Histone,scales = "free", space = "free")+
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma") +
+  theme_bw(base_size=10) + 
+  ylab("Insert Size") + 
+  ggtitle("Fragment Length Distribution of all Samples") + 
+  scale_y_continuous(breaks = seq(0, 1000, 50)) + 
+  theme(legend.position="bottom", axis.text.x =element_text(angle=90, size=8))
+```
+
+# COMPARISON OF FRAGMENT COUNTS PER PEAK BETWEEN EC & JAN'S TN5
+```{r}
+# for fragment counts counted under nonredundant H3K27ac master peak set, add up number of fragments of rep 1 & rep 2 of each Tn5 for each peak 
+ac_scatter <- data.frame(EC=apply(assay(rlog_K27ac_dds)[ ,1:2], 1, sum), pGTn5=apply(assay(rlog_K27ac_dds)[ ,3:4], 1, sum), Histone="H3K27ac")
+
+# for fragment counts counted under nonredundant H3K27me3 master peak set, add up number of fragments of rep 1 & rep 2 of each Tn5 for each peak 
+me3_scatter <- data.frame(EC=apply(assay(rlog_K27me3_dds)[ ,5:6], 1, sum), pGTn5=apply(assay(rlog_K27me3_dds)[ ,7:8], 1, sum), Histone="H3K27me3")
+
+# rbind H3K27ac & H3K27me3 fragment counts per peak information
+scatter <- rbind(ac_scatter, me3_scatter)
+
+# plot rlog normalized counts under peaks with Jan's pGTn5 on x axis & EC's pAG-Tn5 on y-axis. 
+scatter_plot <- ggplot(scatter, aes(x=pGTn5, y=EC, color=Histone))+geom_point(size=0.5)+facet_wrap(~Histone)+
+scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.55, option = "magma") +
+theme_bw(base_size = 18)+ggtitle("rlog normalized counts under peaks")
+
+scatter_plot
+```
+
+# READ COVERAGE AROUND TSS
+```{r}
+library(soGGi)
+library(profileplyr)
+library(rtracklayer)
+
+genes <- import("/lustre/fs4/risc_lab/store/jyeung/references/gencode.v41.GRCh38.p13.annotation.gtf") # import gencode database
+
+# get coordinates of TSS by fixing genes to 1st bp
+TSS <- resize(genes[genes$type %in% "gene", ], fix="start", width=1)
+# resize TSS region into 1500 bp downstream & upstream of start. This is the area we will get coverage of
+TSS <- resize(TSS, fix="center", width=3000)
+
+# plot coverage around TSS using soGGi package: 
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1")
+# generate ChIPprofile object as input for plotRegion function. 
+TSS_signal <- list()
+for(i in 1:length(Summary$samples[7:14])){
+  TSS_signal[[i]] <- regionPlot(paste0(Summary$samples[7:14][i], "/", bamDir[i]), testRanges=TSS)
+}
+# make into vector for plotRegion function to accept
+TSS_cov <- c(TSS_signal[[1]], TSS_signal[[2]], TSS_signal[[3]], TSS_signal[[4]], TSS_signal[[5]], TSS_signal[[6]], TSS_signal[[7]], TSS_signal[[8]])
+TSS_cov@metadata[["names"]] <- as.character(Summary$samples[7:14]) # assign sample names so we can colourBy = "Sample" 
+
+# plot Coverage around TSS
+plotRegion(TSS_cov, colourBy = "Sample")+ggtitle("Read Coverage around TSS")+theme_classic()+ scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma")
+```
+
+```{r, eval=F}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/")
+# with profileplyr package generate heatmap showing read coverage around TSS
+proplyrObject <- list()
+object_sumMat <- list()
+# with soGGi output, convert it to profileplyr object
+for(i in 1:length(TSS_signal)){
+proplyrObject[[i]] <- as_profileplyr(TSS_signal[[i]]) 
+object_sumMat[[i]] <- summarize(proplyrObject[[i]], 
+                           fun = rowMeans, 
+                           output = "matrix") # gets mean of coverage across region of interest, to be used as input into pheatmap to compare overall coverage around TSS between samples
+}
+object_sumMat <- do.call(cbind, object_sumMat) # combine mean coverage info for all samples into 1 matrix
+
+# convert proplyrObject list into vector for export to DeepTools
+proplyrObject_vect <- c(proplyrObject[[1]], proplyrObject[[2]], proplyrObject[[3]], proplyrObject[[4]], proplyrObject[[5]], proplyrObject[[6]], proplyrObject[[7]], proplyrObject[[8]])
+
+# export into matrix object for input into DeepTools
+export_deepToolsMat(proplyrObject_vect, con = "TSS_heatmap_all.MAT.gz", overwrite = T)
+```
+
+##### plot heatmap of coverage around TSS sites using DeepTools on command line, under ATACseq conda env
+```{sh, eval=F}
+source activate ATACseq
+
+plotHeatmap -m TSS_heatmap_all.MAT.gz -out TSS_heatmap_all.MAT.pdf --samplesLabel H3K27ac_EC_1 H3K27ac_EC_2 H3K27ac_pGTn5_1 H3K27ac_pgTn5_2 H3K27me3_EC_1 H3K27me3_EC_2 H3K27me3_pGTn5_1 H3K27ac_me3Tn5_2
+```
+
+```{r, out.width="0.3\\linewidth", include=TRUE, fig.align="center", fig.cap=c("TSS coverage plots: DeepTools output"), echo=FALSE}
+knitr::include_graphics("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/OpenTn5_MCF7_QC_11082022_files/TSS_heatmap_all.MAT.pdf")
+```
+
+##### I tried for the longest time to plot TSS coverage heatmaps with profileplyr package using generateEnrichedHeatmap function but it crashes constantly and the objects created are really big. Just stick with Deeptools from now on. 
+```{r, eval=F}
+generateEnrichedHeatmap(proplyrObject[[1]])
+generateEnrichedHeatmap(proplyrObject[[2]])
+generateEnrichedHeatmap(proplyrObject[[3]])
+generateEnrichedHeatmap(proplyrObject[[4]])
+generateEnrichedHeatmap(proplyrObject[[5]])
+generateEnrichedHeatmap(proplyrObject[[6]])
+generateEnrichedHeatmap(proplyrObject[[7]])
+generateEnrichedHeatmap(proplyrObject[[8]])
+```
+
+# get read coverage over ATAC-seq peaks
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/landerson01/20220615_MCF7_OpenTn5/Peaks/")
+# import in master peak set for ATAC-seq (created by Lauren)
+ATAC_peaks <- import("MCF7_atac_opentn5.masterpeakset.narrowPeak", format="BED")
+```
+```{r}
+# plot coverage around ATAC-seq using soGGi package: 
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1")
+# generate ChIPprofile object as input for plotRegion function. 
+ATAC_signal <- list()
+for(i in 1:length(Summary$samples[7:14])){
+  ATAC_signal[[i]] <- regionPlot(paste0(Summary$samples[7:14][i], "/", bamDir[i]), testRanges=ATAC_peaks)
+}
+# make into vector for plotRegion function to accept
+ATAC_cov <- c(ATAC_signal[[1]], ATAC_signal[[2]], ATAC_signal[[3]], ATAC_signal[[4]], ATAC_signal[[5]], ATAC_signal[[6]], ATAC_signal[[7]], ATAC_signal[[8]])
+ATAC_cov@metadata[["names"]] <- as.character(Summary$samples[7:14]) # assign sample names so we can colourBy = "Sample" 
+
+# plot Coverage around ATAC-seq peaks 
+plotRegion(ATAC_cov, colourBy = "Sample")+ggtitle("Read Coverage around ATAC-seq peaks")+theme_classic()+ scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma")
+```
+
+```{r, eval=F}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/")
+# with profileplyr package generate heatmap showing read coverage around TSS
+proplyrATAC <- list()
+# with soGGi output, convert it to profileplyr object
+for(i in 1:length(ATAC_signal)){
+proplyrATAC[[i]] <- as_profileplyr(ATAC_signal[[i]]) 
+}
+
+# convert proplyrATAC list into vector for export to DeepTools
+proplyrATAC_vect <- c(proplyrATAC[[1]], proplyrATAC[[2]], proplyrATAC[[3]], proplyrATAC[[4]], proplyrATAC[[5]], proplyrATAC[[6]], proplyrATAC[[7]], proplyrATAC[[8]])
+
+# export into matrix object for input into DeepTools
+export_deepToolsMat(proplyrATAC_vect, con = "ATAC_heatmap_all.MAT.gz", overwrite = T)
+```
+##### plot heatmap of coverage around TSS sites using DeepTools on command line, under ATACseq conda env
+```{sh, eval=F}
+source activate ATACseq
+
+plotHeatmap -m ATAC_heatmap_all.MAT.gz -out ATAC_heatmap_all.MAT.pdf --samplesLabel H3K27ac_EC_1 H3K27ac_EC_2 H3K27ac_pGTn5_1 H3K27ac_pgTn5_2 H3K27me3_EC_1 H3K27me3_EC_2 H3K27me3_pGTn5_1 H3K27ac_me3Tn5_2
+```
+
+#### 8-22-2023: counting fragments under different sized bins for supplemental figures for OpenTn5 paper
+```{r}
+library(rtracklayer)
+hg38 <- GRangesForBSGenome("hg38") # get GRanges for hg38 genome
+
+hg38tile <- function(BSGenomeGRanges, width){
+hg38tile <- GenomicRanges::tile(x=BSGenomeGRanges, width=width)
+hg38tile <- hg38tile[seqnames(hg38tile) %in% paste0("chr", c(1:22, "X", "Y")), ] # keep only rows with chr1-22,chrX & chrY
+hg38tile <- unlist(hg38tile)
+return(hg38tile)
+}
+
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1")
+
+# function to count fragments under bins, rlog transform, calculate sample correlation and plot
+count <- function(hg38_tileobj){
+# count fragments under each bin from bam files
+Counts_tiles <- chromVAR::getCounts(paste0(Summary$samples[7:14],"/",bamDir), hg38_tileobj, paired=TRUE, by_rg=FALSE, format="bam")
+Counts_tiles <- SummarizedExperiment::assay(Counts_tiles) # convert into counts matrix, matrix object
+# add row names based on chromosome coordinates
+row.names(Counts_tiles) <- paste0(seqnames(hg38_tileobj), ":", start(hg38_tileobj), "-", end(hg38_tileobj))
+# rename column names
+Counts_tiles@Dimnames[[2]] <- as.character(metaData$samples)
+# import counts matrix into DESeq object
+dds_Counts_tiles <- DESeq2::DESeqDataSetFromMatrix(countData=Counts_tiles, design= Histone~Tn5, colData= metaData)
+return(dds_Counts_tiles)
+}
+
+```
+```{r}
+hg38_10kbtiles <- hg38tile(hg38, 10000)
+
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1")
+# count fragments under each 10kb bin from bam files
+Counts_10kbtiles <- count(hg38_tileobj=hg38_10kbtiles)
+rlog_10kbtiles <- DESeq2::rlog(Counts_10kbtiles)
+corr_10kb <- makesampleDistMatrix(rlog_10kbtiles, method="spearman", main="Spearman Correlation, rlog counts under 10Kb Windows")
+corr_10kb_norlog <- makesampleDistMatrix(Counts_10kbtiles, method="spearman", main="Spearman Correlation, raw counts under 10Kb Windows")
+
+corr_10kb
+corr_10kb_norlog
+```
+
+```{r}
+hg38_100kbtiles <- hg38tile(hg38, 100000)
+
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1")
+# count fragments under each 100kb bin from bam files
+Counts_100kbtiles <- count(hg38_tileobj=hg38_100kbtiles)
+rlog_100kbtiles <- DESeq2::rlog(Counts_100kbtiles)
+corr_100kb <- makesampleDistMatrix(rlog_100kbtiles, "spearman", main="Spearman Correlation, rlog counts under 100Kb Windows")
+corr_100kb_norlog <- makesampleDistMatrix(Counts_100kbtiles, "spearman", main="Spearman Correlation, raw counts under 100Kb Windows")
+
+corr_100kb
+corr_100kb_norlog
+```
+
+```{r}
+hg38_1Mbtiles <- hg38tile(hg38, 1000000)
+
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1")
+# count fragments under each 1Mb bin from bam files
+Counts_1Mbtiles <- count(hg38_tileobj=hg38_1Mbtiles)
+rlog_1Mbtiles <- DESeq2::rlog(Counts_1Mbtiles)
+corr_1Mb <- makesampleDistMatrix(rlog_1Mbtiles, "spearman", main="Spearman Correlation, rlog counts under 1Mb Windows")
+corr_1Mb_norlog <- makesampleDistMatrix(Counts_1Mbtiles, "spearman", main="Spearman Correlation, raw counts under 1Mb Windows")
+
+corr_1Mb
+corr_1Mb_norlog
+```
+
+# PLOT FRAGMENT LENGTH DISTRIBUTIONS NORMALIZED BY SIZE FACTORS FROM DESEQ
+```{r}
+# get size Factor from DESeq object on reads counted until 10kb windows across the genome
+tile10kb_sizeFactor <- estimateSizeFactors(Counts_10kbtiles)
+tile100kb_sizeFactor <- estimateSizeFactors(Counts_100kbtiles)
+final_hist_norm <- FLD
+for(i in 1:8){
+  final_hist_norm[[i]]$All_Reads.fr_count <- final_hist_norm[[i]]$All_Reads.fr_count/tile100kb_sizeFactor$sizeFactor[i]
+}
+
+final_hist_norm <- do.call(rbind, final_hist_norm) # rbind each samples' histogram dataframe into 1 final dataframe. 
+final_hist_norm$samples <- unlist(lapply(Summary$samples[7:14], rep, 1000)) # specify samples column so that we can color ggplot by sample. 
+
+final_hist_norm <- cbind(final_hist_norm, Summary[match(final_hist_norm$samples, Summary$samples), c("Histone", "Tn5", "Replicate")])
+
+# ggplot fragment length distribution histogram: 
+FLDnorm_Plot <- ggplot(final_hist_norm, aes(x=insert_size, y=All_Reads.fr_count, colour=samples)) + 
+  facet_grid(Histone~Tn5, scales = "free", space = "free")+
+  geom_line(size=0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "rocket") +
+   theme_bw(base_size = 10) + 
+  ylab("Read Counts normalized by Size Factor") + 
+  xlab("insert size(bp)")+
+  xlim(0,750)+
+  ggtitle("Fragment Length Distribution of all Samples") + 
+  theme(legend.position="bottom")
+
+# ggplot fragment length distribution histogram scaled by log10: 
+FLDnormlog10_Plot <- ggplot(final_hist_norm, aes(x=insert_size, y=log10(All_Reads.fr_count), colour=samples)) + 
+  facet_grid(Histone~Tn5, scales = "free", space = "free")+
+  geom_line(size=0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "rocket") +
+   theme_bw(base_size = 10) + 
+  ylab("log10(Read Counts) normalized by Size Factor") + 
+  xlab("insert size(bp)")+
+  xlim(0,750)+
+  ggtitle("Fragment Length Distribution of all Samples") + 
+  theme(legend.position="bottom")
+
+FLDnorm_Plot
+FLDnormlog10_Plot
+```
+
+# PLOT TAPESTATION TRACES
+```{r}
+# read in Sample Intensity files
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/OpenTn5_MCF7_QC_11082022_files")
+TS <- read.csv("Comparison_4_Lanes_f89_OpenTn5_MCF7_H3K27me3-cHSD1000_Electropherogram.csv")
+TS <- cbind(TS, read.csv("Comparison_4_Lanes_f89_OpenTn5_MCF7_H3K27ac-cHSD1000_Electropherogram.csv"))
+
+# rename column names to be samples
+colnames(TS) <- c("MCF7_H3K27me3_ECpAGTn5_2", "MCF7_H3K27ac_SI_ECpAGTn5_1", "MCF7_H3K27ac_SI_ECpAGTn5_2", "MCF7_H3K27me3_ECpAGTn5_1", "MCF7_H3K27me3_JanpGTn5_1", "MCF7_H3K27me3_JanpGTn5_2", "MCF7_H3K27ac_SI_JanpGTn5_1", "MCF7_H3K27ac_SI_JanpGTn5_2")
+
+# reorder columns so it matches order of metaData info
+TS <- TS[ ,match(metaData$samples, colnames(TS))]
+
+# organize into dataframe that ggplot can plot
+TS_df <- list()
+for(i in 1:ncol(TS)){
+
+TS_df[[i]] <- data.frame(Sample_Intensity=TS[ ,i], samples=metaData$samples[i], Histone=metaData$Histone[i], Tn5=metaData$Tn5[i], Replicate=metaData$Replicate[i])
+TS_df[[i]]$position <- 1:nrow(TS)
+}
+TS_df <- do.call(rbind, TS_df)
+
+# plot tapestation traces with ggplot
+TS_Plot <- ggplot(TS_df, aes(x=position, y=Sample_Intensity, colour=samples)) + 
+  facet_grid(Histone~Tn5, scales = "free", space = "free")+
+  geom_line(size=0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "rocket") +
+   theme_bw(base_size = 10) + 
+  ylab("Sample Intensity (Normalized FU") + 
+  xlab("Size(bp)")+
+  xlim(0,750)+
+  ggtitle("Tapestation Traces prior to sequencing") + 
+  theme(legend.position="bottom")+
+theme(axis.text.x=element_blank())
+TS_Plot
+```
+
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/OpenTn5_MCF7_QC_11082022_files/Figures")
+pdf("OpenTn5_correlationMatrix.pdf", width=8, height=6)
+plot_grid(corr_K27ac[[4]])
+plot_grid(corr_K27me3[[4]])
+plot_grid(corr_10kb_norlog[[4]])
+plot_grid(corr_100kb_norlog[[4]])
+plot_grid(corr_1Mb_norlog[[4]])
+
+plot_grid(corr_K27ac_rlog[[4]])
+plot_grid(corr_K27me3_rlog[[4]])
+plot_grid(corr_10kb[[4]])
+plot_grid(corr_100kb[[4]])
+plot_grid(corr_1Mb[[4]])
+dev.off()
+```
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/OpenTn5_MCF7_QC_11082022_files/Figures")
+pdf("OpenTn5_FLD_normalizedCounts.pdf", width=10, height=8)
+FLDnorm_Plot
+FLDnormlog10_Plot
+TS_Plot
+dev.off()
+```
+
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/OpenTn5_MCF7_QC_11082022_files/Figures")
+pdf("OpenTn5_Fragments_under_Peaks.pdf", width=10, height=8)
+FRIP_plot
+scatter_plot
+dev.off()
+```
+
+
+# session Info: 
+```{r}
+sessionInfo()
+```
