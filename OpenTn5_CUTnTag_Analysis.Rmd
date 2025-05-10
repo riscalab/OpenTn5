@@ -485,94 +485,6 @@ TSS_cov@metadata[["names"]] <- as.character(Summary$samples[7:14]) # assign samp
 plotRegion(TSS_cov, colourBy = "Sample")+ggtitle("Read Coverage around TSS")+theme_classic()+ scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma")
 ```
 
-```{r, eval=F}
-setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/")
-# with profileplyr package generate heatmap showing read coverage around TSS
-proplyrObject <- list()
-object_sumMat <- list()
-# with soGGi output, convert it to profileplyr object
-for(i in 1:length(TSS_signal)){
-proplyrObject[[i]] <- as_profileplyr(TSS_signal[[i]]) 
-object_sumMat[[i]] <- summarize(proplyrObject[[i]], 
-                           fun = rowMeans, 
-                           output = "matrix") # gets mean of coverage across region of interest, to be used as input into pheatmap to compare overall coverage around TSS between samples
-}
-object_sumMat <- do.call(cbind, object_sumMat) # combine mean coverage info for all samples into 1 matrix
-
-# convert proplyrObject list into vector for export to DeepTools
-proplyrObject_vect <- c(proplyrObject[[1]], proplyrObject[[2]], proplyrObject[[3]], proplyrObject[[4]], proplyrObject[[5]], proplyrObject[[6]], proplyrObject[[7]], proplyrObject[[8]])
-
-# export into matrix object for input into DeepTools
-export_deepToolsMat(proplyrObject_vect, con = "TSS_heatmap_all.MAT.gz", overwrite = T)
-```
-
-##### plot heatmap of coverage around TSS sites using DeepTools on command line, under ATACseq conda env
-```{sh, eval=F}
-source activate ATACseq
-
-plotHeatmap -m TSS_heatmap_all.MAT.gz -out TSS_heatmap_all.MAT.pdf --samplesLabel H3K27ac_EC_1 H3K27ac_EC_2 H3K27ac_pGTn5_1 H3K27ac_pgTn5_2 H3K27me3_EC_1 H3K27me3_EC_2 H3K27me3_pGTn5_1 H3K27ac_me3Tn5_2
-```
-
-```{r, out.width="0.3\\linewidth", include=TRUE, fig.align="center", fig.cap=c("TSS coverage plots: DeepTools output"), echo=FALSE}
-knitr::include_graphics("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/OpenTn5_MCF7_QC_11082022_files/TSS_heatmap_all.MAT.pdf")
-```
-
-##### I tried for the longest time to plot TSS coverage heatmaps with profileplyr package using generateEnrichedHeatmap function but it crashes constantly and the objects created are really big. Just stick with Deeptools from now on. 
-```{r, eval=F}
-generateEnrichedHeatmap(proplyrObject[[1]])
-generateEnrichedHeatmap(proplyrObject[[2]])
-generateEnrichedHeatmap(proplyrObject[[3]])
-generateEnrichedHeatmap(proplyrObject[[4]])
-generateEnrichedHeatmap(proplyrObject[[5]])
-generateEnrichedHeatmap(proplyrObject[[6]])
-generateEnrichedHeatmap(proplyrObject[[7]])
-generateEnrichedHeatmap(proplyrObject[[8]])
-```
-
-# get read coverage over ATAC-seq peaks
-```{r}
-setwd("/lustre/fs4/risc_lab/scratch/landerson01/20220615_MCF7_OpenTn5/Peaks/")
-# import in master peak set for ATAC-seq (created by Lauren)
-ATAC_peaks <- import("MCF7_atac_opentn5.masterpeakset.narrowPeak", format="BED")
-```
-```{r}
-# plot coverage around ATAC-seq using soGGi package: 
-setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1")
-# generate ChIPprofile object as input for plotRegion function. 
-ATAC_signal <- list()
-for(i in 1:length(Summary$samples[7:14])){
-  ATAC_signal[[i]] <- regionPlot(paste0(Summary$samples[7:14][i], "/", bamDir[i]), testRanges=ATAC_peaks)
-}
-# make into vector for plotRegion function to accept
-ATAC_cov <- c(ATAC_signal[[1]], ATAC_signal[[2]], ATAC_signal[[3]], ATAC_signal[[4]], ATAC_signal[[5]], ATAC_signal[[6]], ATAC_signal[[7]], ATAC_signal[[8]])
-ATAC_cov@metadata[["names"]] <- as.character(Summary$samples[7:14]) # assign sample names so we can colourBy = "Sample" 
-
-# plot Coverage around ATAC-seq peaks 
-plotRegion(ATAC_cov, colourBy = "Sample")+ggtitle("Read Coverage around ATAC-seq peaks")+theme_classic()+ scale_color_viridis(discrete = TRUE, begin = 0.1, end = 0.9, option = "magma")
-```
-
-```{r, eval=F}
-setwd("/lustre/fs4/risc_lab/scratch/jyeung/CUTnTag_MCF7_LS8817_1/")
-# with profileplyr package generate heatmap showing read coverage around TSS
-proplyrATAC <- list()
-# with soGGi output, convert it to profileplyr object
-for(i in 1:length(ATAC_signal)){
-proplyrATAC[[i]] <- as_profileplyr(ATAC_signal[[i]]) 
-}
-
-# convert proplyrATAC list into vector for export to DeepTools
-proplyrATAC_vect <- c(proplyrATAC[[1]], proplyrATAC[[2]], proplyrATAC[[3]], proplyrATAC[[4]], proplyrATAC[[5]], proplyrATAC[[6]], proplyrATAC[[7]], proplyrATAC[[8]])
-
-# export into matrix object for input into DeepTools
-export_deepToolsMat(proplyrATAC_vect, con = "ATAC_heatmap_all.MAT.gz", overwrite = T)
-```
-##### plot heatmap of coverage around TSS sites using DeepTools on command line, under ATACseq conda env
-```{sh, eval=F}
-source activate ATACseq
-
-plotHeatmap -m ATAC_heatmap_all.MAT.gz -out ATAC_heatmap_all.MAT.pdf --samplesLabel H3K27ac_EC_1 H3K27ac_EC_2 H3K27ac_pGTn5_1 H3K27ac_pgTn5_2 H3K27me3_EC_1 H3K27me3_EC_2 H3K27me3_pGTn5_1 H3K27ac_me3Tn5_2
-```
-
 #### 8-22-2023: counting fragments under different sized bins for supplemental figures for OpenTn5 paper
 ```{r}
 library(rtracklayer)
@@ -600,7 +512,6 @@ Counts_tiles@Dimnames[[2]] <- as.character(metaData$samples)
 dds_Counts_tiles <- DESeq2::DESeqDataSetFromMatrix(countData=Counts_tiles, design= Histone~Tn5, colData= metaData)
 return(dds_Counts_tiles)
 }
-
 ```
 ```{r}
 hg38_10kbtiles <- hg38tile(hg38, 10000)
